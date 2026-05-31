@@ -2,7 +2,6 @@
 <html lang="vi">
 <head>
 <title>Lộ trình chuyên Anh — Bin</title>
-<!-- Lộ trình học chuyên Anh cho Bin — tần suất cố định theo sách, rải đều theo ngày, Gantt + tracker + lịch test -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -163,7 +162,7 @@
     <div class="title-block">
       <div class="eyebrow">Lộ trình chuyên Anh · theo tần suất sách</div>
       <h1>Kế hoạch học &amp; theo dõi của Bin</h1>
-      <p>Học 6 ngày/tuần, mỗi bài rải đều một ngày để không dồn cục; Chủ nhật dành cho test &amp; ôn. Giai đoạn 1 xây nền với 4 sách; giai đoạn 2 thêm CPE Use of English. Tick từng bài — tiến độ tự lưu.</p>
+      <p>Học 6 ngày/tuần, mỗi bài rải đều một ngày để không dồn cục; Chủ nhật dành cho test &amp; ôn. Giai đoạn 1 xây nền với 4 sách; giai đoạn 2 thêm CPE Use of English. Tick từng bài — tiến độ tự động đồng bộ trên mọi thiết bị.</p>
     </div>
     <div class="startbox">
       <label for="start">Ngày bắt đầu</label>
@@ -241,10 +240,13 @@
   </div>
 
   <footer>
-    Tiến độ được lưu trong trình duyệt (localStorage) — mỗi người mở sẽ có tiến độ riêng.<br>
+    Tiến độ được lưu trên hệ thống đám mây (Firebase) — dùng chung một tài khoản tiến độ.<br>
     <button class="reset" id="resetBtn">Xoá toàn bộ tiến độ &amp; bắt đầu lại</button>
   </footer>
 </div>
+
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
 
 <script>
 /* ---------- Books & rates ---------- */
@@ -457,11 +459,59 @@ function renderTests(){
 }
 function renderAll(){renderRates();renderOverview();renderDay();renderWeek();renderGantt();renderTests();}
 
-/* ---------- Persistence ---------- */
-function save(){try{localStorage.setItem("roadmap_state_v2",JSON.stringify(STATE));}catch(e){}}
-function load(){try{const r=localStorage.getItem("roadmap_state_v2");if(r)STATE=JSON.parse(r);}catch(e){}
-  if(!STATE.start)STATE.start=ymd(new Date());if(!STATE.done)STATE.done={};if(!STATE.notes)STATE.notes={};}
-function toggle(id){if(STATE.done[id])delete STATE.done[id];else STATE.done[id]=true;save();renderAll();}
+/* ---------- Firebase Integration ---------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyDcdOdq8u00aRoiFhnUt_EfSPRtdQ01idg", // NOTE: ĐẢM BẢO BẠN ĐÃ THAY MÃ API KEY CỦA BẠN VÀO ĐÂY, HOẶC CHỈNH Ở BƯỚC NÀY
+  authDomain: "binz-123.firebaseapp.com",
+  databaseURL: "https://binz-123-default-rtdb.firebaseio.com",
+  projectId: "binz-123",
+  storageBucket: "binz-123.firebasestorage.app",
+  messagingSenderId: "970408251535",
+  appId: "1:970408251535:web:7367d0492a14c3143ca0fa"
+};
+
+firebase.initializeApp(firebaseConfig);
+const database = firebase.database();
+const stateRef = database.ref('globalState');
+
+/* ---------- State Management (Cloud) ---------- */
+function initFirebase() {
+  stateRef.on('value', (snapshot) => {
+    const data = snapshot.val();
+    if (data) {
+      STATE = data;
+    } else {
+      // If DB is empty, initialize default structure
+      STATE = { start: ymd(new Date()), done: {}, notes: {} };
+      stateRef.set(STATE);
+    }
+    
+    // Validate state structure
+    if (!STATE.start) STATE.start = ymd(new Date());
+    if (!STATE.done) STATE.done = {};
+    if (!STATE.notes) STATE.notes = {};
+    
+    buildSchedule();
+    curDay = Math.max(0,Math.min(TOTAL_WEEKS*7-1,dayDiff(new Date(),STATE.start)));
+    curWeek = Math.floor(curDay/7);
+    renderAll();
+    
+    // Update date picker
+    const si = document.getElementById("start");
+    if (si) si.value = STATE.start;
+  });
+}
+
+function saveCloud() {
+  stateRef.set(STATE);
+}
+
+function toggle(id){
+  if(STATE.done[id]) delete STATE.done[id];
+  else STATE.done[id] = true;
+  saveCloud(); 
+  // No need to renderAll() manually here because stateRef.on('value') will trigger it
+}
 
 /* ---------- Events ---------- */
 function bind(){
@@ -469,25 +519,54 @@ function bind(){
     document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));t.classList.add("on");
     document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));
     document.getElementById("v-"+t.dataset.v).classList.add("on");});
+    
   document.getElementById("dayBody").addEventListener("click",e=>{const t=e.target.closest(".task");if(t)toggle(t.dataset.id);});
   document.getElementById("weekBody").addEventListener("click",e=>{const t=e.target.closest(".wt[data-id]");if(t)toggle(t.dataset.id);});
   document.getElementById("testBody").addEventListener("click",e=>{const h=e.target.closest(".test-h");if(h)toggle(h.dataset.tid);});
-  document.getElementById("testBody").addEventListener("input",e=>{const ta=e.target.closest("textarea[data-note]");if(ta){STATE.notes[ta.dataset.note]=ta.value;save();}});
+  
+  // Note inputs (debounced to avoid spamming the DB)
+  let timeoutId;
+  document.getElementById("testBody").addEventListener("input",e=>{
+    const ta=e.target.closest("textarea[data-note]");
+    if(ta){
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+          STATE.notes[ta.dataset.note]=ta.value;
+          saveCloud();
+      }, 500); // Wait 500ms after user stops typing
+    }
+  });
+  
   document.getElementById("prevDay").onclick=()=>{curDay=Math.max(0,curDay-1);renderDay();};
   document.getElementById("nextDay").onclick=()=>{curDay=Math.min(SCHEDULE.length-1,curDay+1);renderDay();};
   document.getElementById("goToday").onclick=()=>{curDay=todayIndex();renderDay();};
+  
   document.getElementById("prevWeek").onclick=()=>{curWeek=Math.max(0,curWeek-1);renderWeek();};
   document.getElementById("nextWeek").onclick=()=>{curWeek=Math.min(TOTAL_WEEKS-1,curWeek+1);renderWeek();};
   document.getElementById("goWeekNow").onclick=()=>{curWeek=Math.floor(todayIndex()/7);renderWeek();};
+  
   document.getElementById("tFilter").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
     document.querySelectorAll("#tFilter button").forEach(x=>x.classList.remove("on"));b.classList.add("on");testFilter=b.dataset.f;renderTests();});
-  const si=document.getElementById("start");si.value=STATE.start;
-  si.onchange=()=>{STATE.start=si.value||ymd(new Date());save();buildSchedule();curDay=todayIndex();curWeek=Math.floor(curDay/7);renderAll();};
-  document.getElementById("resetBtn").onclick=async()=>{if(!confirm("Xoá toàn bộ tiến độ đã tick và ghi chú?"))return;
-    STATE={start:ymd(new Date()),done:{},notes:{}};save();si.value=STATE.start;buildSchedule();curDay=todayIndex();curWeek=Math.floor(curDay/7);renderAll();};
+    
+  const si=document.getElementById("start");
+  si.onchange=()=>{
+      STATE.start=si.value||ymd(new Date());
+      saveCloud();
+  };
+  
+  document.getElementById("resetBtn").onclick=async()=>{
+      if(!confirm("Xóa toàn bộ tiến độ của TẤT CẢ mọi người trên hệ thống?")) return;
+      STATE = { start: ymd(new Date()), done: {}, notes: {} };
+      saveCloud();
+  };
 }
 
-(function init(){load();buildSchedule();curDay=todayIndex();curWeek=Math.floor(curDay/7);bind();renderAll();})();
+/* ---------- Init ---------- */
+document.addEventListener("DOMContentLoaded", () => {
+    bind();
+    initFirebase(); // Starts the real-time sync
+});
+
 </script>
 </body>
 </html>
